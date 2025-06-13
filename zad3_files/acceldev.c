@@ -215,13 +215,22 @@ static int create_buffer(int size, struct pci_dev *pdev, enum acceldev_buffer_ty
 	int bfd = anon_inode_getfd(ACCELDEV_NAME, &acceldev_buffer_fops, buf_data, O_RDWR);
 	if (bfd < 0) {
   		dealloc_page_table(buf_data, pdev);
+		kfree(buf_data->pages_dma);
+  		kfree(buf_data->pages_cpu);
   		kfree(buf_data);
  	}
 	if (type == BUFFER_TYPE_DATA) {
 		for (int i = 0; i < ACCELDEV_NUM_BUFFERS; i++) {
 			if (ctx->buffers[i] == 0) {
 				ctx->buffers[i] = bfd;
-				result->buffer_slot = i;
+				struct acceldev_ioctl_create_buffer_result res = {.buffer_slot = i};
+				if (copy_to_user(result, &res, sizeof(struct acceldev_ioctl_create_buffer_result))) {
+					dealloc_page_table(buf_data, pdev);
+					kfree(buf_data->pages_dma);
+  					kfree(buf_data->pages_cpu);
+					kfree(buf_data);
+					return -EFAULT; // Failed to copy data to user space
+				}
 				break;
 			}
 		}
@@ -235,14 +244,19 @@ static int create_buffer(int size, struct pci_dev *pdev, enum acceldev_buffer_ty
 static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
 	switch (cmd) {
 		case ACCELDEV_IOCTL_CREATE_BUFFER: {
-			struct acceldev_ioctl_create_buffer* create_buf = (struct acceldev_ioctl_create_buffer*)arg;
+			struct acceldev_ioctl_create_buffer* create_buf = kmalloc(sizeof(struct acceldev_ioctl_create_buffer), GFP_KERNEL);
+			if (copy_from_user(create_buf, (void __user *)arg, sizeof(struct acceldev_ioctl_create_buffer))) {
+				kfree(create_buf);
+				return -EFAULT; // Failed to copy data from user space
+			}
+			
 			if (!create_buf || 
 				create_buf->size <= 0 || 
 				create_buf->size > ACCELDEV_BUFFER_MAX_SIZE || 
 				create_buf->type >= BUFFER_TYPES_COUNT) {
+					kfree(create_buf);
 				return -EINVAL; // Invalid arguments
 			}
-			/*
 			struct acceldev_context *ctx = file->private_data;
 			if (create_buf->type == BUFFER_TYPE_DATA) {
 				int i;
@@ -252,6 +266,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 					}
 				}
 				if (i == ACCELDEV_NUM_BUFFERS) {
+					kfree(create_buf);
 					return -ENOSPC;
 				}
 			}
@@ -259,8 +274,8 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			int size = create_buf->size;
 			enum acceldev_buffer_type type = create_buf->type;
 			int bfd = create_buffer(size, ctx->dev->pdev, type, ctx, create_buf->result);
-			*/
-			return 0;
+			kfree(create_buf);
+			return bfd;
 		}
 
 		case ACCELDEV_IOCTL_RUN: {
