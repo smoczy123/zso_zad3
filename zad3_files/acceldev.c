@@ -242,6 +242,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				create_buf->type >= BUFFER_TYPES_COUNT) {
 				return -EINVAL; // Invalid arguments
 			}
+			/*
 			struct acceldev_context *ctx = file->private_data;
 			if (create_buf->type == BUFFER_TYPE_DATA) {
 				int i;
@@ -258,8 +259,8 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			int size = create_buf->size;
 			enum acceldev_buffer_type type = create_buf->type;
 			int bfd = create_buffer(size, ctx->dev->pdev, type, ctx, create_buf->result);
-
-			return bfd;
+			*/
+			return 0;
 		}
 
 		case ACCELDEV_IOCTL_RUN: {
@@ -295,7 +296,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 static int acceldev_open(struct inode *inode, struct file *file)
 {
 	struct acceldev_device *dev = container_of(inode->i_cdev, struct acceldev_device, cdev);
-	struct acceldev_context *ctx = kzalloc(sizeof *ctx, GFP_KERNEL);
+	struct acceldev_context *ctx = kmalloc(sizeof(struct acceldev_context), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
     int i = 0;
