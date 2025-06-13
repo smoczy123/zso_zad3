@@ -38,12 +38,13 @@ struct acceldev_device {
 	spinlock_t slock;
     struct acceldev_context *ctx[ACCELDEV_MAX_CONTEXTS];
     dma_addr_t contexts_config_dma;
-    void *contexts_config_cpu;
+    struct acceldev_context_on_device_config* contexts_config_cpu;
 };
 
 struct acceldev_context {
     struct acceldev_device *dev;
 	int buffers[ACCELDEV_NUM_BUFFERS];
+	int ctx_idx;
 };
 
 struct acceldev_buffer_data {
@@ -52,7 +53,10 @@ struct acceldev_buffer_data {
 	size_t buffer_size;
 	dma_addr_t* pages_dma;
 	void** pages_cpu;
-	struct pci_dev *pdev; 	
+	struct pci_dev *pdev;
+	int ctx_idx;
+	int buffer_slot;
+	struct acceldev_device *dev;
 };
 
 static void dealloc_page_table(struct acceldev_buffer_data *buf_data, struct pci_dev *pdev) {
@@ -138,6 +142,22 @@ static inline void acceldev_iow(struct acceldev_device *dev, uint32_t reg, uint3
 //	printk(KERN_ALERT "acceldev %03x <- %08x\n", reg, val);
 }
 
+static void write_bind_slot(struct acceldev_device *dev, int ctx_idx, int slot, dma_addr_t page_table) {
+	uint32_t reg = 0x008c;
+	uint32_t header = 0x2;
+	uint32_t idx = (uint32_t)ctx_idx;
+	header |= (idx << 4);
+	acceldev_iow(dev, reg, header);
+	reg += 4;
+	acceldev_iow(dev, reg, slot);
+	reg += 4;
+	acceldev_iow(dev, reg, (uint32_t)page_table);
+	reg += 4;
+	acceldev_iow(dev, reg, page_table >> 32);
+	reg += 4;
+	acceldev_iow(dev, reg, 0); // reserved
+}
+
 static inline uint32_t acceldev_ior(struct acceldev_device *dev, uint32_t reg)
 {
 	uint32_t res = ioread32(dev->bar + reg);
@@ -176,6 +196,7 @@ static const struct vm_operations_struct buffer_vm_ops = {
 static int buffer_release(struct inode *inode, struct file *filp) {
 	// TODO: WAIT FOR CONTEXT TO FINISH
  	struct acceldev_buffer_data* buf_data = (struct acceldev_buffer_data*)filp->private_data;
+	write_bind_slot(buf_data->dev, buf_data->ctx_idx, buf_data->buffer_slot, 0);
  	struct pci_dev *pdev = buf_data->pdev;
 	if (buf_data) {
   		dealloc_page_table(buf_data, pdev); // Assuming pdev is not needed here
@@ -207,6 +228,7 @@ static int create_buffer(int size, struct pci_dev *pdev, enum acceldev_buffer_ty
  	}
 	buf_data->buffer_size = size;
 	buf_data->pdev = pdev;
+	buf_data->dev = ctx->dev;
 	if ((err = alloc_page_table(buf_data, pdev)) < 0) {
 		kfree(buf_data);
 		return err;
@@ -220,9 +242,9 @@ static int create_buffer(int size, struct pci_dev *pdev, enum acceldev_buffer_ty
   		kfree(buf_data);
  	}
 	if (type == BUFFER_TYPE_DATA) {
+		int idx = ctx->ctx_idx;
 		for (int i = 0; i < ACCELDEV_NUM_BUFFERS; i++) {
-			if (ctx->buffers[i] == 0) {
-				ctx->buffers[i] = bfd;
+			if (ctx->dev->contexts_config_cpu[idx].buffers_slots_config_ptr[i] == 0) {
 				struct acceldev_ioctl_create_buffer_result res = {.buffer_slot = i};
 				if (copy_to_user(result, &res, sizeof(struct acceldev_ioctl_create_buffer_result))) {
 					dealloc_page_table(buf_data, pdev);
@@ -231,6 +253,12 @@ static int create_buffer(int size, struct pci_dev *pdev, enum acceldev_buffer_ty
 					kfree(buf_data);
 					return -EFAULT; // Failed to copy data to user space
 				}
+				write_bind_slot(ctx->dev, idx, i, buf_data->page_table_dma);
+				struct fd bfd_file = fdget(bfd);
+				struct acceldev_buffer_data* buf = (struct acceldev_buffer_data*)fd_file(bfd_file)->private_data;
+				buf->ctx_idx = idx;
+				buf->buffer_slot = i;
+				fdput(bfd_file);
 				break;
 			}
 		}
@@ -328,6 +356,7 @@ static int acceldev_open(struct inode *inode, struct file *file)
         kfree(ctx);
         return -EINVAL;
     }
+	ctx->ctx_idx = i;
     ctx->dev = dev;
     file->private_data = ctx;
 	return nonseekable_open(inode, file);
@@ -420,7 +449,7 @@ static int acceldev_probe(struct pci_dev *pdev,
     }
 	memset(dev->contexts_config_cpu, 0, ACCELDEV_MAX_CONTEXTS * sizeof(struct acceldev_context_on_device_config));
 
-    acceldev_iow(dev, ACCELDEV_CONTEXTS_CONFIGS, dev->contexts_config_dma & 0xFFFFFFFF);  
+    acceldev_iow(dev, ACCELDEV_CONTEXTS_CONFIGS, dev->contexts_config_dma);  
     acceldev_iow(dev, ACCELDEV_CONTEXTS_CONFIGS + 4, dev->contexts_config_dma >> 32);
     
 	
