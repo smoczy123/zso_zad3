@@ -314,6 +314,9 @@ static int acceldev_open(struct inode *inode, struct file *file)
 	struct acceldev_context *ctx = kmalloc(sizeof(struct acceldev_context), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
+	for (int i = 0; i < ACCELDEV_NUM_BUFFERS; i++) {
+		ctx->buffers[i] = 0; // Initialize all buffer slots to 0		
+	}
     int i = 0;
 	for (; i < ACCELDEV_MAX_CONTEXTS; i++) {
         if (!dev->ctx[i]) {
