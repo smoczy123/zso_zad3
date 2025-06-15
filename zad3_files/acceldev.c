@@ -578,12 +578,15 @@ static int acceldev_open(struct inode *inode, struct file *file)
 		ctx->buffers[i] = 0; // Initialize all buffer slots to 0		
 	}
     int i = 0;
+	unsigned long flags;
+	spin_lock_irqsave(&dev->slock, flags);
 	for (; i < ACCELDEV_MAX_CONTEXTS; i++) {
         if (!dev->ctx[i]) {
             dev->ctx[i] = ctx;
             break;
         }
     }
+	spin_unlock_irqrestore(&dev->slock, flags);
     if (i == ACCELDEV_MAX_CONTEXTS) {
         kfree(ctx);
         return -EINVAL;
@@ -599,8 +602,10 @@ static int acceldev_open(struct inode *inode, struct file *file)
 
 static int acceldev_release(struct inode *inode, struct file *file)
 {
+	unsigned long flags;
 	struct acceldev_context *ctx = file->private_data;
 	struct acceldev_device *dev = ctx->dev;
+	spin_lock_irqsave(&dev->slock, flags);
     for (int i = 0; i < ACCELDEV_MAX_CONTEXTS; i++) {
         if (dev->ctx[i] == ctx) {
 			memset(&dev->contexts_config_cpu[i], 0, sizeof(struct acceldev_context_on_device_config));
@@ -608,6 +613,7 @@ static int acceldev_release(struct inode *inode, struct file *file)
             break;
         }
     }
+	spin_unlock_irqrestore(&dev->slock, flags);
 	kfree(ctx);
 	return 0;
 }
