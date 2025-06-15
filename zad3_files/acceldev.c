@@ -21,7 +21,6 @@
 #include <linux/kref.h>
 #include <linux/interrupt.h>
 #include <linux/string.h>
-#include <string.h>
 
 #include "acceldev.h"
 
