@@ -2,9 +2,11 @@
 #include "asm/page.h"
 #include "linux/dma-mapping.h"
 #include "linux/fs.h"
+#include "linux/list.h"
 #include "linux/mm.h"
 #include "linux/mm_types.h"
 #include "linux/slab.h"
+#include "linux/spinlock.h"
 #include "linux/types.h"
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -39,6 +41,8 @@ struct acceldev_device {
     struct acceldev_context *ctx[ACCELDEV_MAX_CONTEXTS];
     dma_addr_t contexts_config_dma;
     struct acceldev_context_on_device_config* contexts_config_cpu;
+	struct list_head cmd_queue;
+	uint32_t dev_fence_counter;
 };
 
 struct acceldev_context {
@@ -47,16 +51,19 @@ struct acceldev_context {
 	int ctx_idx;
 };
 
+struct command {
+	uint32_t cmd[5];
+	struct list_head lh;
+};
+
 struct acceldev_buffer_data {
 	void* page_table_cpu;
 	dma_addr_t page_table_dma;
 	size_t buffer_size;
 	dma_addr_t* pages_dma;
 	void** pages_cpu;
-	struct pci_dev *pdev;
-	int ctx_idx;
+	struct file *ctx_file;
 	int buffer_slot;
-	struct acceldev_device *dev;
 };
 
 static void dealloc_page_table(struct acceldev_buffer_data *buf_data, struct pci_dev *pdev) {
@@ -70,7 +77,9 @@ static void dealloc_page_table(struct acceldev_buffer_data *buf_data, struct pci
 				break;
 			}
   		}
-	  	dma_free_coherent(&(pdev->dev), 1024 * 32, buf_data->page_table_cpu, buf_data->page_table_dma);		
+	  	dma_free_coherent(&(pdev->dev), 1024 * 32, buf_data->page_table_cpu, buf_data->page_table_dma);	
+		kfree(buf_data->pages_cpu);
+		kfree(buf_data->pages_dma);
 	}
 }
 
@@ -142,22 +151,6 @@ static inline void acceldev_iow(struct acceldev_device *dev, uint32_t reg, uint3
 //	printk(KERN_ALERT "acceldev %03x <- %08x\n", reg, val);
 }
 
-static void write_bind_slot(struct acceldev_device *dev, int ctx_idx, int slot, dma_addr_t page_table) {
-	uint32_t reg = 0x008c;
-	uint32_t header = 0x2;
-	uint32_t idx = (uint32_t)ctx_idx;
-	header |= (idx << 4);
-	acceldev_iow(dev, reg, header);
-	reg += 4;
-	acceldev_iow(dev, reg, slot);
-	reg += 4;
-	acceldev_iow(dev, reg, (uint32_t)page_table);
-	reg += 4;
-	acceldev_iow(dev, reg, page_table >> 32);
-	reg += 4;
-	acceldev_iow(dev, reg, 0); // reserved
-}
-
 static inline uint32_t acceldev_ior(struct acceldev_device *dev, uint32_t reg)
 {
 	uint32_t res = ioread32(dev->bar + reg);
@@ -165,10 +158,90 @@ static inline uint32_t acceldev_ior(struct acceldev_device *dev, uint32_t reg)
 	return res;
 }
 
+static void write_command(struct acceldev_device *dev, uint32_t *cmd) {
+	uint32_t reg = CMD_MANUAL_FEED;
+	for (int i = 0; i < 5; i++) {
+  		acceldev_iow(dev, reg, cmd[i]);
+  		reg += 4;
+ 	}
+}
+
+static void schedule_wait(struct acceldev_device *dev) {
+	uint32_t reg = CMD_MANUAL_FEED;
+	acceldev_iow(dev, reg, ACCELDEV_DEVICE_CMD_TYPE_FENCE);
+	acceldev_iow(dev, reg + 4, dev->dev_fence_counter);
+	acceldev_iow(dev, reg + 8, 0);
+	acceldev_iow(dev, reg + 12, 0);
+	acceldev_iow(dev, reg + 16, 0);
+
+}
+
+static void run_queue(struct acceldev_device *dev) {
+	uint32_t cmd_left;
+	while (!list_empty(&dev->cmd_queue)) {
+		cmd_left = acceldev_ior(dev, CMD_MANUAL_FREE);
+		if (cmd_left > 3) {
+			struct command *cmd = list_entry(dev->cmd_queue.next, struct command, lh);
+			list_del(&cmd->lh);
+			acceldev_iow(dev, ACCELDEV_CMD_FENCE_WAIT, 0);
+			write_command(dev, cmd->cmd);
+			kfree(cmd);
+		} else if (cmd_left == 3) {
+			schedule_wait(dev);
+			acceldev_iow(dev, ACCELDEV_CMD_FENCE_WAIT, dev->dev_fence_counter);
+			dev->dev_fence_counter += 2; // Always odd to never hit 0
+			break;
+		} else {
+			break;
+		}
+	}
+}
+
+static int submit_command(struct acceldev_device *dev, uint32_t *cmd) {
+	unsigned long flags;
+	spin_lock_irqsave(&dev->slock, flags);
+	struct command *list_cmd = kmalloc(sizeof(struct command), GFP_KERNEL);
+	if (!list_cmd) {
+		spin_unlock_irqrestore(&dev->slock, flags);
+		return -ENOMEM;
+	}
+	for (int i = 0; i < 5; i++) {
+  		list_cmd->cmd[i] = cmd[i];
+ 	}
+	list_add_tail(&list_cmd->lh, &dev->cmd_queue);
+	run_queue(dev);
+	spin_unlock_irqrestore(&dev->slock, flags);
+	return 0;
+}
+
+static int write_bind_slot(struct acceldev_device *dev, int ctx_idx, int slot, dma_addr_t page_table) {
+	uint32_t cmd[5];
+	uint32_t idx = (uint32_t)ctx_idx;
+	cmd[0] = ACCELDEV_DEVICE_CMD_BIND_SLOT_HEADER(idx);
+	cmd[1] = slot;
+	cmd[2] = (uint32_t)page_table;
+	cmd[3] = page_table >> 32;
+	cmd[4] = 0;
+	return submit_command(dev, cmd);	
+}
+
+
+
 static irqreturn_t acceldev_isr(int irq, void *opaque)
 {
-	
-	return IRQ_RETVAL(0);
+	struct acceldev_device *dev = opaque;
+	unsigned long flags;
+	uint32_t istatus;
+	spin_lock_irqsave(&dev->slock, flags);
+	istatus = acceldev_ior(dev, ACCELDEV_INTR) & acceldev_ior(dev, ACCELDEV_INTR_ENABLE);
+	if (istatus) {
+		if (istatus & ACCELDEV_INTR_FENCE_WAIT) {
+			run_queue(dev);
+		}
+
+	}
+
+	return IRQ_RETVAL(istatus);
 }
 
 
@@ -196,14 +269,14 @@ static const struct vm_operations_struct buffer_vm_ops = {
 static int buffer_release(struct inode *inode, struct file *filp) {
 	// TODO: WAIT FOR CONTEXT TO FINISH
  	struct acceldev_buffer_data* buf_data = (struct acceldev_buffer_data*)filp->private_data;
-	write_bind_slot(buf_data->dev, buf_data->ctx_idx, buf_data->buffer_slot, 0);
- 	struct pci_dev *pdev = buf_data->pdev;
-	if (buf_data) {
-  		dealloc_page_table(buf_data, pdev); // Assuming pdev is not needed here
-  		kfree(buf_data->pages_dma);
-  		kfree(buf_data->pages_cpu);
-  		kfree(buf_data);
- 	}
+	struct acceldev_context *ctx = buf_data->ctx_file->private_data;
+	if (buf_data->buffer_slot >= 0) {
+		write_bind_slot(ctx->dev, ctx->ctx_idx, buf_data->buffer_slot, 0);
+	}
+ 	struct pci_dev *pdev = ctx->dev->pdev;
+  	dealloc_page_table(buf_data, pdev);
+	fput(buf_data->ctx_file);
+  	kfree(buf_data);
  	return 0;
 }
 
@@ -220,50 +293,60 @@ static const struct file_operations acceldev_buffer_fops = {
  .release = buffer_release,
 };
 
-static int create_buffer(int size, struct pci_dev *pdev, enum acceldev_buffer_type type, struct acceldev_context *ctx, struct acceldev_ioctl_create_buffer_result *result) {
+static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_type type, struct acceldev_ioctl_create_buffer_result *result) {
 	int err;
 	struct acceldev_buffer_data *buf_data = kmalloc(sizeof(struct acceldev_buffer_data), GFP_KERNEL);
 	if (!buf_data) {
-  		return -ENOMEM;
- 	}
+  		err = -ENOMEM;
+		goto out_buf_data;
+  	}
+	struct acceldev_context *ctx = ctx_file->private_data;
 	buf_data->buffer_size = size;
-	buf_data->pdev = pdev;
-	buf_data->dev = ctx->dev;
-	if ((err = alloc_page_table(buf_data, pdev)) < 0) {
-		kfree(buf_data);
-		return err;
+	int idx = ctx->ctx_idx;
+	if ((err = alloc_page_table(buf_data, ctx->dev->pdev)) < 0) {
+		goto out_alloc;
 	}
+	buf_data->buffer_slot = -1;
+	get_file(ctx_file);
+	buf_data->ctx_file = ctx_file;
 
 	int bfd = anon_inode_getfd(ACCELDEV_NAME, &acceldev_buffer_fops, buf_data, O_RDWR);
 	if (bfd < 0) {
-  		dealloc_page_table(buf_data, pdev);
-		kfree(buf_data->pages_dma);
-  		kfree(buf_data->pages_cpu);
-  		kfree(buf_data);
+  		err = bfd;
+		goto out_copy;
  	}
+
 	if (type == BUFFER_TYPE_DATA) {
-		int idx = ctx->ctx_idx;
 		for (int i = 0; i < ACCELDEV_NUM_BUFFERS; i++) {
 			if (ctx->dev->contexts_config_cpu[idx].buffers_slots_config_ptr[i] == 0) {
 				struct acceldev_ioctl_create_buffer_result res = {.buffer_slot = i};
 				if (copy_to_user(result, &res, sizeof(struct acceldev_ioctl_create_buffer_result))) {
-					dealloc_page_table(buf_data, pdev);
-					kfree(buf_data->pages_dma);
-  					kfree(buf_data->pages_cpu);
-					kfree(buf_data);
-					return -EFAULT; // Failed to copy data to user space
+					err = -EFAULT;
+					goto out_copy;
 				}
-				write_bind_slot(ctx->dev, idx, i, buf_data->page_table_dma);
+				if (write_bind_slot(ctx->dev, idx, i, buf_data->page_table_dma)) {
+					err = -ENOMEM;
+					goto out_copy;
+				}
 				struct fd bfd_file = fdget(bfd);
 				struct acceldev_buffer_data* buf = (struct acceldev_buffer_data*)fd_file(bfd_file)->private_data;
-				buf->ctx_idx = idx;
 				buf->buffer_slot = i;
 				fdput(bfd_file);
 				break;
 			}
 		}
 	}
+
 	return bfd;
+
+out_copy:
+	dealloc_page_table(buf_data, ctx->dev->pdev);
+	fput(ctx_file);
+out_alloc:
+ 	kfree(buf_data);
+out_buf_data:
+	return err;
+
 
 }
 
@@ -301,7 +384,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 
 			int size = create_buf->size;
 			enum acceldev_buffer_type type = create_buf->type;
-			int bfd = create_buffer(size, ctx->dev->pdev, type, ctx, create_buf->result);
+			int bfd = create_buffer(size, file, type, create_buf->result);
 			kfree(create_buf);
 			return bfd;
 		}
@@ -414,6 +497,7 @@ static int acceldev_probe(struct pci_dev *pdev,
 	}
 	acceldev_devices[i] = dev;
 	dev->idx = i;
+	dev->dev_fence_counter = 1;
 	mutex_unlock(&acceldev_devices_lock);
 
 	/* Enable hardware resources.  */
@@ -432,6 +516,7 @@ static int acceldev_probe(struct pci_dev *pdev,
 		err = -ENOMEM;
 		goto out_bar;
 	}
+	INIT_LIST_HEAD(&dev->cmd_queue);
 
 	/* Connect the IRQ line.  */
 	if ((err = request_irq(pdev->irq, acceldev_isr, IRQF_SHARED, ACCELDEV_NAME, dev)))
