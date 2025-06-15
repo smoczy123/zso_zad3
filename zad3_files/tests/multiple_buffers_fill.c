@@ -24,6 +24,9 @@ struct test_buffer_run {
   int index;
 };
 
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+uint32_t fence_counter = 0;
+
 void runner_thread(void *opaque) {
   struct test_buffer_run *data = opaque;
 
@@ -51,9 +54,13 @@ void runner_thread(void *opaque) {
   code_buffer[offset + 4] = fill_len;
   code_buffer[offset + 5] = ACCELDEV_USER_CMD_TYPE_FENCE;
 
+	pthread_mutex_lock(&mutex);
+	uint32_t fence_wait = ++fence_counter;
   do_run(data->fd, data->cfd, offset * sizeof(uint32_t),
          commands_len * sizeof(uint32_t));
-  do_wait(data->fd, 1);
+	pthread_mutex_unlock(&mutex);
+
+  do_wait(data->fd, fence_wait); //TODO: test that if we do + 1 then infinite waiting;
 
   for (int i = 0; i < data->index; i++)
     assert(data_buffer[i] == 0);
