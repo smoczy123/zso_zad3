@@ -240,7 +240,6 @@ static void write_to_ctx(struct acceldev_device *dev) {
 			unsigned long flags;
 			spin_lock_irqsave(&dev->ctx[i]->ctx_lock, flags);
 			struct acceldev_context_on_device_config *ctx_config = &dev->contexts_config_cpu[i];
-			printk(KERN_ERR "acceldev: writing context %d status %d fence_counter %d\n", i, ctx_config->status, ctx_config->fence_counter);
 			dev->ctx[i]->fence_counter = ctx_config->fence_counter;
 			dev->ctx[i]->status = ctx_config->status;
 			spin_unlock_irqrestore(&dev->ctx[i]->ctx_lock, flags);
