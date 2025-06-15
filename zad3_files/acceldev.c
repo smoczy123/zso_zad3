@@ -462,7 +462,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			struct file *buf_file = fget(run_cmd->cfd);
 			struct acceldev_buffer_data *buf_data = (struct acceldev_buffer_data*)buf_file->private_data;
 			struct acceldev_context *buf_ctx = buf_data->ctx_file->private_data;
-			if (run_cmd->addr + run_cmd->size > buf_data->buffer_size) {
+			if (run_cmd->addr + run_cmd->size > buf_data->buffer_size || buf_data->buffer_slot < 0) {
 				fput(buf_file);
 				kfree(run_cmd);
 				ctx->dev->contexts_config_cpu[ctx->ctx_idx].status = ACCELDEV_CONTEXT_STATUS_ERROR;
