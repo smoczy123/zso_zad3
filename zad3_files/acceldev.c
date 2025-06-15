@@ -529,17 +529,18 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			struct acceldev_context *ctx = file->private_data;
 			spin_lock_irqsave(&ctx->ctx_lock, flags);
 			uint32_t current_counter = ctx->fence_counter;
+			uint8_t status = ctx->status;
 			printk(KERN_ERR "My counter: %u, wait: %u, ctx: %d\n", current_counter, wait_cmd->fence_wait, ctx->ctx_idx);
 			uint32_t fence_wait = wait_cmd->fence_wait;
-			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(ctx->status)) {
+			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(status)) {
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
-				if (wait_event_interruptible(ctx->dev->user_waits, ctx->fence_counter >= fence_wait || 
-				acceldev_context_on_device_config_is_error(ctx->status))) {
+				if (wait_event_interruptible(ctx->dev->user_waits, true)) {
 					kfree(wait_cmd);
 					return -EINTR; // Interrupted by signal
 				}
 				spin_lock_irqsave(&ctx->ctx_lock, flags);
 				current_counter = ctx->fence_counter;
+				status = ctx->status;				
 			}
 			if  (acceldev_context_on_device_config_is_error(ctx->status)) {
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
