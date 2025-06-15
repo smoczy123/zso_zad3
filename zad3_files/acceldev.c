@@ -67,6 +67,7 @@ struct acceldev_buffer_data {
 	dma_addr_t page_table_dma;
 	size_t buffer_size;
 	dma_addr_t* pages_dma;
+	enum acceldev_buffer_type type;
 	void** pages_cpu;
 	struct file *ctx_file;
 	int buffer_slot;
@@ -328,6 +329,7 @@ static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_t
 		goto out_buf_data;
   	}
 	buf_data->buffer_size = size;
+	buf_data->type = type;
 	int idx = ctx->ctx_idx;
 	if ((err = alloc_page_table(buf_data, ctx->dev->pdev)) < 0) {
 		goto out_alloc;
@@ -462,7 +464,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			struct file *buf_file = fget(run_cmd->cfd);
 			struct acceldev_buffer_data *buf_data = (struct acceldev_buffer_data*)buf_file->private_data;
 			struct acceldev_context *buf_ctx = buf_data->ctx_file->private_data;
-			if (run_cmd->addr + run_cmd->size > buf_data->buffer_size || buf_data->buffer_slot < 0) {
+			if (run_cmd->addr + run_cmd->size > buf_data->buffer_size || buf_data->type != BUFFER_TYPE_CODE) {
 				fput(buf_file);
 				kfree(run_cmd);
 				ctx->dev->contexts_config_cpu[ctx->ctx_idx].status = ACCELDEV_CONTEXT_STATUS_ERROR;
