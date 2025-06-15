@@ -422,6 +422,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 					}
 				}
 				if (i == ACCELDEV_NUM_BUFFERS) {
+					spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 					kfree(create_buf);
 					return -ENOSPC;
 				}
