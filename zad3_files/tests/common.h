@@ -15,8 +15,8 @@ int do_open(char *path) {
 }
 
 int do_open_with_error(char *path) {
-  if ((open(path, O_RDWR)) == 0)
-    syserr("open should fail");
+	if ((open(path, O_RDWR)) == 0)
+		syserr("open should fail");
 }
 
 int do_open0() { return do_open("/dev/acceldev0"); }
@@ -79,9 +79,8 @@ void do_wait_for_err(int fd, uint32_t fence_wait) {
     syserr("wait should fail");
 }
 
-void do_run_and_wait_with_err(int fd, int cfd, uint32_t addr, uint32_t size,
-                              uint32_t fence_wait) {
+void do_run_and_wait_with_err(int fd, int cfd, uint32_t addr, uint32_t size) {
   struct acceldev_ioctl_run run = {cfd, addr, size};
   ioctl(fd, ACCELDEV_IOCTL_RUN, &run); // ignore
-  do_wait_for_err(fd, fence_wait);
+  do_wait_for_err(fd, 0);
 }

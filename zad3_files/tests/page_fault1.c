@@ -24,9 +24,7 @@ int main() {
 
   int bfd = do_create_buf(fd, 0x1000, BUFFER_TYPE_CODE, &result);
 
-  do_run_and_wait_with_err(fd, bfd, 0x1000,
-                           ACCELDEV_USER_CMD_WORDS * sizeof(uint32_t) * 10,
-                           1000000);
+  do_run_and_wait_with_err(fd, bfd, 0x1000, 1);
   do_close(fd);
   return 0;
 }
