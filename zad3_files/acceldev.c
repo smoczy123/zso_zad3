@@ -411,6 +411,22 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			}
 			int size = create_buf->size;
 			enum acceldev_buffer_type type = create_buf->type;
+			struct acceldev_context *ctx = file->private_data;
+			spin_lock_irqsave(&ctx->ctx_lock, flags);
+			int i = -1;
+			if (create_buf->type == BUFFER_TYPE_DATA) {
+				for (i = 0; i < ACCELDEV_NUM_BUFFERS; i++) {
+					if (ctx->buffers[i] == 0) {
+						ctx->buffers[i] = -1; // Mark as used
+						break;
+					}
+				}
+				if (i == ACCELDEV_NUM_BUFFERS) {
+					kfree(create_buf);
+					return -ENOSPC;
+				}
+			}
+			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 			int bfd = create_buffer(size, file, type, create_buf->result);
 			kfree(create_buf);
 			return bfd;
