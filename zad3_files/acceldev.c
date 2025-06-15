@@ -6,6 +6,7 @@
 #include "linux/list.h"
 #include "linux/mm.h"
 #include "linux/mm_types.h"
+#include "linux/printk.h"
 #include "linux/slab.h"
 #include "linux/spinlock.h"
 #include "linux/spinlock_types.h"
@@ -488,6 +489,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			struct acceldev_context *ctx = file->private_data;
 			spin_lock_irqsave(&ctx->ctx_lock, flags);
 			uint32_t current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
+			printk(KERN_ERR "My counter: %u, wait: %u\n", current_counter, wait_cmd->fence_wait);
 			uint8_t status = ctx->dev->contexts_config_cpu[ctx->ctx_idx].status;
 			uint32_t fence_wait = wait_cmd->fence_wait;
 			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(status)) {
