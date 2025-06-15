@@ -554,6 +554,7 @@ static int acceldev_open(struct inode *inode, struct file *file)
 
 static int acceldev_release(struct inode *inode, struct file *file)
 {
+	printk(KERN_ERR "Closing context file\n");
 	struct acceldev_context *ctx = file->private_data;
 	struct acceldev_device *dev = ctx->dev;
     for (int i = 0; i < ACCELDEV_MAX_CONTEXTS; i++) {
