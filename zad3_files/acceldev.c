@@ -490,7 +490,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			uint32_t current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
 			uint8_t status = ctx->dev->contexts_config_cpu[ctx->ctx_idx].status;
 			uint32_t fence_wait = wait_cmd->fence_wait;
-			while (current_counter < fence_wait || !acceldev_context_on_device_config_is_error(status)) {
+			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(status)) {
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				if (wait_event_interruptible(ctx->dev->user_waits, current_counter >= fence_wait || 
 				acceldev_context_on_device_config_is_error(status))) {
