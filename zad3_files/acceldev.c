@@ -423,7 +423,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				run_cmd->size > ACCELDEV_BUFFER_MAX_SIZE - run_cmd->addr || 
 				run_cmd->addr % ACCELDEV_USER_CMD_WORDS * sizeof(uint32_t) != 0 ||
 				run_cmd->size % ACCELDEV_USER_CMD_WORDS * sizeof(uint32_t) != 0) {
-
+				printk(KERN_ERR "acceldev: Invalid arguments in run command\n");
 				return -EINVAL; // Invalid arguments
 			}
 			struct acceldev_context *ctx = file->private_data;
@@ -439,6 +439,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			struct acceldev_buffer_data *buf_data = (struct acceldev_buffer_data*)buf_file->private_data;
 			struct acceldev_context *buf_ctx = buf_data->ctx_file->private_data;
 			if (buf_ctx->ctx_idx != ctx->ctx_idx) {
+				printk(KERN_ERR "acceldev: Context mismatch in run command\n");
 				fput(buf_file);
 				kfree(run_cmd);
 				return -EINVAL;
