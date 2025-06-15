@@ -291,6 +291,7 @@ static const struct vm_operations_struct buffer_vm_ops = {
 
 static int buffer_release(struct inode *inode, struct file *filp) {
 	// TODO: WAIT FOR CONTEXT TO FINISH
+	printk(KERN_ERR "Closing buffer file\n");
  	struct acceldev_buffer_data* buf_data = (struct acceldev_buffer_data*)filp->private_data;
 	struct acceldev_context *ctx = buf_data->ctx_file->private_data;
 	if (buf_data->buffer_slot >= 0) {
