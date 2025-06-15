@@ -511,7 +511,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			struct acceldev_context *ctx = file->private_data;
 			spin_lock_irqsave(&ctx->ctx_lock, flags);
 			uint32_t current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
-			printk(KERN_ERR "My counter: %u, wait: %u\n", current_counter, wait_cmd->fence_wait);
+			printk(KERN_ERR "My counter: %u, wait: %u, ctx: %d\n", current_counter, wait_cmd->fence_wait, ctx->ctx_idx);
 			uint8_t status = ctx->dev->contexts_config_cpu[ctx->ctx_idx].status;
 			uint32_t fence_wait = wait_cmd->fence_wait;
 			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(status)) {
@@ -521,15 +521,16 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 					kfree(wait_cmd);
 					return -EINTR; // Interrupted by signal
 				}
-				printk(KERN_ERR "Woken up");
 				spin_lock_irqsave(&ctx->ctx_lock, flags);
 				current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
 			}
 			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 			if  (acceldev_context_on_device_config_is_error(status)) {
+				printk(KERN_ERR "Error while waiting for: %d in context %d\n", fence_wait, ctx->ctx_idx);
 				kfree(wait_cmd);
 				return -EIO; // Context is in error state
 			}
+			printk(KERN_ERR "Finished waiting for: %d in context %d\n", fence_wait, ctx->ctx_idx);
    			kfree(wait_cmd);
 			return 0;
 		}
