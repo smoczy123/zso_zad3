@@ -312,11 +312,14 @@ static const struct vm_operations_struct buffer_vm_ops = {
 
 static int buffer_release(struct inode *inode, struct file *filp) {
 	// TODO: WAIT FOR CONTEXT TO FINISH
+	unsigned long flags;
  	struct acceldev_buffer_data* buf_data = (struct acceldev_buffer_data*)filp->private_data;
 	struct acceldev_context *ctx = buf_data->ctx_file->private_data;
 	if (buf_data->buffer_slot >= 0) {
 		write_bind_slot(ctx->dev, ctx->ctx_idx, buf_data->buffer_slot, 0);
+		spin_lock_irqsave(&ctx->ctx_lock, flags);
 		ctx->buffers[buf_data->buffer_slot] = 0;
+		spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 	}
  	struct pci_dev *pdev = ctx->dev->pdev;
   	dealloc_page_table(buf_data, pdev);
@@ -485,20 +488,22 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			struct file *buf_file = fget(run_cmd->cfd);
 			struct acceldev_buffer_data *buf_data = (struct acceldev_buffer_data*)buf_file->private_data;
 			struct acceldev_context *buf_ctx = buf_data->ctx_file->private_data;
+			spin_lock_irqsave(&ctx->ctx_lock, flags);
 			if (run_cmd->addr + run_cmd->size > buf_data->buffer_size || buf_data->type != BUFFER_TYPE_CODE) {
 				fput(buf_file);
 				kfree(run_cmd);
-				spin_lock_irqsave(&ctx->ctx_lock, flags);
 				ctx->status = ACCELDEV_CONTEXT_STATUS_ERROR;
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				return -EINVAL;
    	       	}
 			if (buf_ctx->ctx_idx != ctx->ctx_idx) {
 				printk(KERN_ERR "acceldev: Context mismatch in run command\n");
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				fput(buf_file);
 				kfree(run_cmd);
 				return -EINVAL;
 			}
+			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 			uint32_t *cmd = kmalloc(sizeof(uint32_t) * 5, GFP_KERNEL);
 			if (!cmd) {
 				
