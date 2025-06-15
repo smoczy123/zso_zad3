@@ -55,6 +55,8 @@ struct acceldev_context {
 	int buffers[ACCELDEV_NUM_BUFFERS];
 	spinlock_t ctx_lock;
 	int ctx_idx;
+	uint32_t fence_counter;
+	uint8_t status;
 };
 
 struct command {
@@ -232,6 +234,18 @@ static int write_bind_slot(struct acceldev_device *dev, int ctx_idx, int slot, d
 	return submit_command(dev, cmd);	
 }
 
+static void write_to_ctx(struct acceldev_device *dev) {
+	for (int i = 0; i < ACCELDEV_MAX_CONTEXTS; i++) {
+  		if (dev->ctx[i]) {
+			unsigned long flags;
+			spin_lock_irqsave(&dev->ctx[i]->ctx_lock, flags);
+			struct acceldev_context_on_device_config *ctx_config = &dev->contexts_config_cpu[i];
+			dev->ctx[i]->fence_counter = ctx_config->fence_counter;
+			dev->ctx[i]->status = ctx_config->status;
+			spin_unlock_irqrestore(&dev->ctx[i]->ctx_lock, flags);
+		}
+ 	}
+}
 
 
 static irqreturn_t acceldev_isr(int irq, void *opaque)
@@ -249,20 +263,24 @@ static irqreturn_t acceldev_isr(int irq, void *opaque)
 		if (istatus & ACCELDEV_INTR_FEED_ERROR) {
 			printk(KERN_ERR "acceldev: feed error\n");
 		}
+		
 		if (istatus & ACCELDEV_INTR_CMD_ERROR) {
 			printk(KERN_ERR "acceldev: command error\n");
-			wake_up_interruptible_all(&dev->user_waits);
 		}
 		if (istatus & ACCELDEV_INTR_MEM_ERROR) {
 			printk(KERN_ERR "acceldev: memory error\n");
-			wake_up_interruptible_all(&dev->user_waits);
 		}
 		if (istatus & ACCELDEV_INTR_SLOT_ERROR) {
    			printk(KERN_ERR "acceldev: slot error\n");
-			wake_up_interruptible_all(&dev->user_waits);
   		}
 		if (istatus & ACCELDEV_INTR_USER_FENCE_WAIT) {
 			printk(KERN_ERR "acceldev: user fence triggered\n");
+		}
+		if (istatus & ACCELDEV_INTR_CMD_ERROR ||
+			istatus & ACCELDEV_INTR_MEM_ERROR ||
+   			istatus & ACCELDEV_INTR_SLOT_ERROR ||
+  		 	istatus & ACCELDEV_INTR_USER_FENCE_WAIT) {
+			write_to_ctx(dev);
 			wake_up_interruptible_all(&dev->user_waits);
 		}
 	}
@@ -510,26 +528,26 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			}
 			struct acceldev_context *ctx = file->private_data;
 			spin_lock_irqsave(&ctx->ctx_lock, flags);
-			uint32_t current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
+			uint32_t current_counter = ctx->fence_counter;
 			printk(KERN_ERR "My counter: %u, wait: %u, ctx: %d\n", current_counter, wait_cmd->fence_wait, ctx->ctx_idx);
-			uint8_t status = ctx->dev->contexts_config_cpu[ctx->ctx_idx].status;
 			uint32_t fence_wait = wait_cmd->fence_wait;
-			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(status)) {
+			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(ctx->status)) {
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
-				if (wait_event_interruptible(ctx->dev->user_waits, ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter >= fence_wait || 
-				acceldev_context_on_device_config_is_error(status))) {
+				if (wait_event_interruptible(ctx->dev->user_waits, ctx->fence_counter >= fence_wait || 
+				acceldev_context_on_device_config_is_error(ctx->status))) {
 					kfree(wait_cmd);
 					return -EINTR; // Interrupted by signal
 				}
 				spin_lock_irqsave(&ctx->ctx_lock, flags);
-				current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
+				current_counter = ctx->fence_counter;
 			}
-			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
-			if  (acceldev_context_on_device_config_is_error(status)) {
+			if  (acceldev_context_on_device_config_is_error(ctx->status)) {
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				printk(KERN_ERR "Error while waiting for: %d in context %d\n", fence_wait, ctx->ctx_idx);
 				kfree(wait_cmd);
 				return -EIO; // Context is in error state
 			}
+			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 			printk(KERN_ERR "Finished waiting for: %d in context %d\n", fence_wait, ctx->ctx_idx);
    			kfree(wait_cmd);
 			return 0;
@@ -561,6 +579,8 @@ static int acceldev_open(struct inode *inode, struct file *file)
         return -EINVAL;
     }
 	ctx->ctx_idx = i;
+	ctx->fence_counter = 0;
+	ctx->status = 0;
     ctx->dev = dev;
 	spin_lock_init(&ctx->ctx_lock);
     file->private_data = ctx;
