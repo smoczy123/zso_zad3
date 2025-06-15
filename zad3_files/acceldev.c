@@ -2,11 +2,13 @@
 #include "asm/page.h"
 #include "linux/dma-mapping.h"
 #include "linux/fs.h"
+#include "linux/gfp_types.h"
 #include "linux/list.h"
 #include "linux/mm.h"
 #include "linux/mm_types.h"
 #include "linux/slab.h"
 #include "linux/spinlock.h"
+#include "linux/spinlock_types.h"
 #include "linux/types.h"
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -43,11 +45,13 @@ struct acceldev_device {
     struct acceldev_context_on_device_config* contexts_config_cpu;
 	struct list_head cmd_queue;
 	uint32_t dev_fence_counter;
+	wait_queue_head_t user_waits; 
 };
 
 struct acceldev_context {
     struct acceldev_device *dev;
 	int buffers[ACCELDEV_NUM_BUFFERS];
+	spinlock_t ctx_lock;
 	int ctx_idx;
 };
 
@@ -235,12 +239,27 @@ static irqreturn_t acceldev_isr(int irq, void *opaque)
 	spin_lock_irqsave(&dev->slock, flags);
 	istatus = acceldev_ior(dev, ACCELDEV_INTR) & acceldev_ior(dev, ACCELDEV_INTR_ENABLE);
 	if (istatus) {
+		acceldev_iow(dev, ACCELDEV_INTR, istatus);
 		if (istatus & ACCELDEV_INTR_FENCE_WAIT) {
 			run_queue(dev);
 		}
-
+		if (istatus & ACCELDEV_INTR_FEED_ERROR) {
+			printk(KERN_ERR "acceldev: feed error\n");
+		}
+		if (istatus & ACCELDEV_INTR_CMD_ERROR) {
+			wake_up_interruptible_all(&dev->user_waits);
+		}
+		if (istatus & ACCELDEV_INTR_MEM_ERROR) {
+			printk(KERN_ERR "acceldev: memory error\n");
+		}
+		if (istatus & ACCELDEV_INTR_SLOT_ERROR) {
+   			printk(KERN_ERR "acceldev: slot error\n");
+  		}
+		if (istatus & ACCELDEV_INTR_USER_FENCE_WAIT) {
+			wake_up_interruptible_all(&dev->user_waits);
+		}
 	}
-
+	spin_unlock_irqrestore(&dev->slock, flags);
 	return IRQ_RETVAL(istatus);
 }
 
@@ -293,7 +312,7 @@ static const struct file_operations acceldev_buffer_fops = {
  .release = buffer_release,
 };
 
-static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_type type, struct acceldev_ioctl_create_buffer_result *result) {
+static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_type type, int slot, struct acceldev_ioctl_create_buffer_result *result) {
 	int err;
 	struct acceldev_buffer_data *buf_data = kmalloc(sizeof(struct acceldev_buffer_data), GFP_KERNEL);
 	if (!buf_data) {
@@ -317,23 +336,15 @@ static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_t
  	}
 
 	if (type == BUFFER_TYPE_DATA) {
-		for (int i = 0; i < ACCELDEV_NUM_BUFFERS; i++) {
-			if (ctx->dev->contexts_config_cpu[idx].buffers_slots_config_ptr[i] == 0) {
-				struct acceldev_ioctl_create_buffer_result res = {.buffer_slot = i};
-				if (copy_to_user(result, &res, sizeof(struct acceldev_ioctl_create_buffer_result))) {
-					err = -EFAULT;
-					goto out_copy;
-				}
-				if (write_bind_slot(ctx->dev, idx, i, buf_data->page_table_dma)) {
-					err = -ENOMEM;
-					goto out_copy;
-				}
-				struct fd bfd_file = fdget(bfd);
-				struct acceldev_buffer_data* buf = (struct acceldev_buffer_data*)fd_file(bfd_file)->private_data;
-				buf->buffer_slot = i;
-				fdput(bfd_file);
-				break;
-			}
+		buf_data->buffer_slot = slot;
+		struct acceldev_ioctl_create_buffer_result res = {.buffer_slot = slot};
+		if (copy_to_user(result, &res, sizeof(struct acceldev_ioctl_create_buffer_result))) {
+			err = -EFAULT;
+			goto out_copy;
+		}
+		if (write_bind_slot(ctx->dev, idx, slot, buf_data->page_table_dma)) {
+			err = -ENOMEM;
+			goto out_copy;
 		}
 	}
 
@@ -353,9 +364,13 @@ out_buf_data:
 /* Main device node handling.  */
 
 static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+	unsigned long flags;
 	switch (cmd) {
 		case ACCELDEV_IOCTL_CREATE_BUFFER: {
 			struct acceldev_ioctl_create_buffer* create_buf = kmalloc(sizeof(struct acceldev_ioctl_create_buffer), GFP_KERNEL);
+			if (!create_buf) {
+				return -ENOMEM; // Memory allocation failed
+			}
 			if (copy_from_user(create_buf, (void __user *)arg, sizeof(struct acceldev_ioctl_create_buffer))) {
 				kfree(create_buf);
 				return -EFAULT; // Failed to copy data from user space
@@ -369,8 +384,9 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				return -EINVAL; // Invalid arguments
 			}
 			struct acceldev_context *ctx = file->private_data;
+			spin_lock_irqsave(&ctx->ctx_lock, flags);
+			int i = -1;
 			if (create_buf->type == BUFFER_TYPE_DATA) {
-				int i;
 				for (i = 0; i < ACCELDEV_NUM_BUFFERS; i++) {
 					if (ctx->buffers[i] == 0) {
 						break;
@@ -384,13 +400,21 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 
 			int size = create_buf->size;
 			enum acceldev_buffer_type type = create_buf->type;
-			int bfd = create_buffer(size, file, type, create_buf->result);
+			int bfd = create_buffer(size, file, type, i, create_buf->result);
+			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 			kfree(create_buf);
 			return bfd;
 		}
 
 		case ACCELDEV_IOCTL_RUN: {
-			struct acceldev_ioctl_run* run_cmd = (struct acceldev_ioctl_run*)arg;
+			struct acceldev_ioctl_run* run_cmd = kmalloc(sizeof(struct acceldev_ioctl_run), GFP_KERNEL);
+			if (!run_cmd) {
+				return -ENOMEM;
+			}
+			if (copy_from_user(run_cmd, (void __user *)arg, sizeof(struct acceldev_ioctl_run))) {
+				kfree(run_cmd);
+				return -EFAULT;
+			}
 			if (!run_cmd ||
 				run_cmd->cfd < 0 || 
 				run_cmd->addr < 0 || 
@@ -402,15 +426,71 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 
 				return -EINVAL; // Invalid arguments
 			}
+			struct acceldev_context *ctx = file->private_data;
+			spin_lock_irqsave(&ctx->ctx_lock, flags);
+			uint8_t status = ctx->dev->contexts_config_cpu[ctx->ctx_idx].status;
+			if (acceldev_context_on_device_config_is_error(status)) {
+				kfree(run_cmd);
+				return -EIO;
+			}
 
 
+			struct file *buf_file = fget(run_cmd->cfd);
+			struct acceldev_buffer_data *buf_data = (struct acceldev_buffer_data*)buf_file->private_data;
+			struct acceldev_context *buf_ctx = buf_data->ctx_file->private_data;
+			if (buf_ctx->ctx_idx != ctx->ctx_idx) {
+				fput(buf_file);
+				kfree(run_cmd);
+				return -EINVAL;
+			}
+			uint32_t cmd[5];
+			cmd[0] = ACCELDEV_DEVICE_CMD_RUN_HEADER(ctx->ctx_idx);
+			cmd[1] = buf_data->page_table_dma;
+			cmd[2] = buf_data->page_table_dma >> 32;
+			cmd[3] = run_cmd->addr;
+			cmd[4] = run_cmd->size;
+			if (submit_command(ctx->dev, cmd) < 0) {
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+				fput(buf_file);
+				kfree(run_cmd);
+				return -ENOMEM; // Failed to submit command
+   			}
+			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+			fput(buf_file);
+			kfree(run_cmd);
 			return 0;
 		}
 
 		case ACCELDEV_IOCTL_WAIT: {
-
-
-
+			struct acceldev_ioctl_wait *wait_cmd = kmalloc(sizeof(struct acceldev_ioctl_wait), GFP_KERNEL);
+			if (!wait_cmd) {
+				return -ENOMEM;
+			}
+			if (copy_from_user(wait_cmd, (void __user *)arg, sizeof(struct acceldev_ioctl_wait))) {
+				kfree(wait_cmd);
+				return -EFAULT;
+			}
+			struct acceldev_context *ctx = file->private_data;
+			spin_lock_irqsave(&ctx->ctx_lock, flags);
+			uint32_t current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
+			uint8_t status = ctx->dev->contexts_config_cpu[ctx->ctx_idx].status;
+			uint32_t fence_wait = wait_cmd->fence_wait;
+			while (current_counter < fence_wait || !acceldev_context_on_device_config_is_error(status)) {
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+				if (wait_event_interruptible(ctx->dev->user_waits, current_counter >= fence_wait || 
+				acceldev_context_on_device_config_is_error(status))) {
+					kfree(wait_cmd);
+					return -EINTR; // Interrupted by signal
+				}
+				spin_lock_irqsave(&ctx->ctx_lock, flags);
+				current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
+			}
+			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+			if  (acceldev_context_on_device_config_is_error(status)) {
+				kfree(wait_cmd);
+				return -EIO; // Context is in error state
+			}
+   			kfree(wait_cmd);
 			return 0;
 		}
 		
@@ -441,6 +521,7 @@ static int acceldev_open(struct inode *inode, struct file *file)
     }
 	ctx->ctx_idx = i;
     ctx->dev = dev;
+	spin_lock_init(&ctx->ctx_lock);
     file->private_data = ctx;
 	return nonseekable_open(inode, file);
 }
@@ -517,26 +598,27 @@ static int acceldev_probe(struct pci_dev *pdev,
 		goto out_bar;
 	}
 	INIT_LIST_HEAD(&dev->cmd_queue);
+	init_waitqueue_head(&dev->user_waits);
 
 	/* Connect the IRQ line.  */
 	if ((err = request_irq(pdev->irq, acceldev_isr, IRQF_SHARED, ACCELDEV_NAME, dev)))
 		goto out_irq;
 
+    dev->contexts_config_cpu = dma_alloc_coherent(&pdev->dev, ACCELDEV_MAX_CONTEXTS * sizeof(struct acceldev_context_on_device_config), &dev->contexts_config_dma, GFP_KERNEL);
+    if (!dev->contexts_config_cpu) {
+        err = -ENOMEM;
+        goto out_contexts;
+    }
+	memset(dev->contexts_config_cpu, 0, ACCELDEV_MAX_CONTEXTS * sizeof(struct acceldev_context_on_device_config));
+
+
 	acceldev_iow(dev, ACCELDEV_INTR, 1);
 	acceldev_iow(dev, ACCELDEV_INTR_ENABLE, ACCELDEV_INTR_FENCE_WAIT | ACCELDEV_INTR_FEED_ERROR |
             ACCELDEV_INTR_CMD_ERROR | ACCELDEV_INTR_MEM_ERROR |
             ACCELDEV_INTR_SLOT_ERROR | ACCELDEV_INTR_USER_FENCE_WAIT);
-
-    dev->contexts_config_cpu = dma_alloc_coherent(&pdev->dev, ACCELDEV_MAX_CONTEXTS * sizeof(struct acceldev_context_on_device_config), &dev->contexts_config_dma, GFP_KERNEL);
-    if (!dev->contexts_config_cpu) {
-        err = -ENOMEM;
-        goto out_cdev;
-    }
-	memset(dev->contexts_config_cpu, 0, ACCELDEV_MAX_CONTEXTS * sizeof(struct acceldev_context_on_device_config));
-
     acceldev_iow(dev, ACCELDEV_CONTEXTS_CONFIGS, dev->contexts_config_dma);  
     acceldev_iow(dev, ACCELDEV_CONTEXTS_CONFIGS + 4, dev->contexts_config_dma >> 32);
-    
+    acceldev_iow(dev, ACCELDEV_ENABLE, 1);
 	
 	/* We're live.  Let's export the cdev.  */
 	cdev_init(&dev->cdev, &acceldev_file_ops);
@@ -556,7 +638,10 @@ static int acceldev_probe(struct pci_dev *pdev,
 	return 0;
 
 out_cdev:
+	dma_free_coherent(&pdev->dev, ACCELDEV_MAX_CONTEXTS * sizeof(struct acceldev_context_on_device_config), dev->contexts_config_cpu, dev->contexts_config_dma);
 	acceldev_iow(dev, ACCELDEV_INTR_ENABLE, 0);
+	acceldev_iow(dev, ACCELDEV_ENABLE, 0);
+out_contexts:
 	free_irq(pdev->irq, dev);
 out_irq:
 	pci_iounmap(pdev, dev->bar);
@@ -578,6 +663,8 @@ out_alloc:
 static void acceldev_remove(struct pci_dev *pdev)
 {
 	struct acceldev_device *dev = pci_get_drvdata(pdev);
+	acceldev_iow(dev, ACCELDEV_INTR_ENABLE, 0);
+	acceldev_iow(dev, ACCELDEV_ENABLE, 0);
 	if (dev->dev) {
 		device_destroy(&acceldev_class, acceldev_devno + dev->idx);
 	}
