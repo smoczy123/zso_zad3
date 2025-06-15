@@ -1,6 +1,7 @@
 #include "asm-generic/fcntl.h"
 #include "asm/page.h"
 #include "linux/dma-mapping.h"
+#include "linux/fdtable.h"
 #include "linux/fs.h"
 #include "linux/gfp_types.h"
 #include "linux/list.h"
@@ -339,7 +340,7 @@ static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_t
 	int bfd = anon_inode_getfd(ACCELDEV_NAME, &acceldev_buffer_fops, buf_data, O_RDWR);
 	if (bfd < 0) {
   		err = bfd;
-		goto out_copy;
+		goto out_getfd;
  	}
 	
 	int slot = -1;
@@ -374,6 +375,8 @@ static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_t
 	return bfd;
 
 out_copy:
+	close_fd(bfd);
+out_getfd:
 	dealloc_page_table(buf_data, ctx->dev->pdev);
 	fput(ctx_file);
 out_alloc:
