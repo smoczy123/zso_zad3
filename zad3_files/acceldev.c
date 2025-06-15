@@ -255,9 +255,11 @@ static irqreturn_t acceldev_isr(int irq, void *opaque)
 		}
 		if (istatus & ACCELDEV_INTR_MEM_ERROR) {
 			printk(KERN_ERR "acceldev: memory error\n");
+			wake_up_interruptible_all(&dev->user_waits);
 		}
 		if (istatus & ACCELDEV_INTR_SLOT_ERROR) {
    			printk(KERN_ERR "acceldev: slot error\n");
+			wake_up_interruptible_all(&dev->user_waits);
   		}
 		if (istatus & ACCELDEV_INTR_USER_FENCE_WAIT) {
 			printk(KERN_ERR "acceldev: user fence triggered\n");
