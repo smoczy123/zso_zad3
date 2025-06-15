@@ -318,16 +318,15 @@ static const struct file_operations acceldev_buffer_fops = {
  .release = buffer_release,
 };
 
-static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_type type, struct acceldev_ioctl_create_buffer_result *result) {
+static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_type type, int slot, struct acceldev_ioctl_create_buffer_result *result) {
 	int err;
 	unsigned long flags;
+	struct acceldev_context *ctx = ctx_file->private_data;
 	struct acceldev_buffer_data *buf_data = kmalloc(sizeof(struct acceldev_buffer_data), GFP_KERNEL);
 	if (!buf_data) {
   		err = -ENOMEM;
 		goto out_buf_data;
   	}
-	
-	struct acceldev_context *ctx = ctx_file->private_data;
 	buf_data->buffer_size = size;
 	int idx = ctx->ctx_idx;
 	if ((err = alloc_page_table(buf_data, ctx->dev->pdev)) < 0) {
@@ -343,19 +342,8 @@ static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_t
 		goto out_getfd;
  	}
 	
-	int slot = -1;
 	if (type == BUFFER_TYPE_DATA) {
 		spin_lock_irqsave(&ctx->ctx_lock, flags);
-		for (slot = 0; slot < ACCELDEV_NUM_BUFFERS; slot++) {
-			if (ctx->buffers[slot] == 0) {
-				break;
-			}
-		}
-		if (slot == ACCELDEV_NUM_BUFFERS) {
-			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
-			err = -ENOSPC;
-			goto out_copy;
-		}
 		buf_data->buffer_slot = slot;
 		ctx->buffers[slot] = bfd;
 		spin_unlock_irqrestore(&ctx->ctx_lock, flags);
@@ -382,6 +370,11 @@ out_getfd:
 out_alloc:
  	kfree(buf_data);
 out_buf_data:
+	if (slot >= 0) {
+  		spin_lock_irqsave(&ctx->ctx_lock, flags);
+  		ctx->buffers[slot] = 0; // Mark slot as free
+  		spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+ 	}
 	return err;
 
 
@@ -428,7 +421,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				}
 			}
 			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
-			int bfd = create_buffer(size, file, type, create_buf->result);
+			int bfd = create_buffer(size, file, type, i, create_buf->result);
 			kfree(create_buf);
 			return bfd;
 		}
