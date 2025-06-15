@@ -293,12 +293,9 @@ static int buffer_release(struct inode *inode, struct file *filp) {
 	// TODO: WAIT FOR CONTEXT TO FINISH
  	struct acceldev_buffer_data* buf_data = (struct acceldev_buffer_data*)filp->private_data;
 	struct acceldev_context *ctx = buf_data->ctx_file->private_data;
-	unsigned long flags;
 	if (buf_data->buffer_slot >= 0) {
 		write_bind_slot(ctx->dev, ctx->ctx_idx, buf_data->buffer_slot, 0);
-		spin_lock_irqsave(&ctx->ctx_lock, flags);
 		ctx->buffers[buf_data->buffer_slot] = 0;
-		spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 	}
  	struct pci_dev *pdev = ctx->dev->pdev;
   	dealloc_page_table(buf_data, pdev);
