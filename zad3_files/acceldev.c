@@ -249,6 +249,7 @@ static irqreturn_t acceldev_isr(int irq, void *opaque)
 			printk(KERN_ERR "acceldev: feed error\n");
 		}
 		if (istatus & ACCELDEV_INTR_CMD_ERROR) {
+			printk(KERN_ERR "acceldev: command error\n");
 			wake_up_interruptible_all(&dev->user_waits);
 		}
 		if (istatus & ACCELDEV_INTR_MEM_ERROR) {
@@ -258,6 +259,7 @@ static irqreturn_t acceldev_isr(int irq, void *opaque)
    			printk(KERN_ERR "acceldev: slot error\n");
   		}
 		if (istatus & ACCELDEV_INTR_USER_FENCE_WAIT) {
+			printk(KERN_ERR "acceldev: user fence triggered\n");
 			wake_up_interruptible_all(&dev->user_waits);
 		}
 	}
