@@ -241,7 +241,7 @@ static void write_to_ctx(struct acceldev_device *dev) {
 			spin_lock_irqsave(&dev->ctx[i]->ctx_lock, flags);
 			struct acceldev_context_on_device_config *ctx_config = &dev->contexts_config_cpu[i];
 			dev->ctx[i]->fence_counter = ctx_config->fence_counter;
-			dev->ctx[i]->status = ctx_config->status;
+			dev->ctx[i]->status = ctx_config->status | dev->ctx[i]->status;
 			spin_unlock_irqrestore(&dev->ctx[i]->ctx_lock, flags);
 		}
  	}
@@ -466,12 +466,14 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				run_cmd->size % sizeof(uint32_t) != 0) {
 
 				printk(KERN_ERR "acceldev: Invalid arguments in run command\n");
-				ctx->dev->contexts_config_cpu[ctx->ctx_idx].status = ACCELDEV_CONTEXT_STATUS_ERROR;
+				spin_lock_irqsave(&ctx->ctx_lock, flags);
+				ctx->status = ACCELDEV_CONTEXT_STATUS_ERROR;
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				return -EINVAL; // Invalid arguments
 			}
 			
 			spin_lock_irqsave(&ctx->ctx_lock, flags);
-			uint8_t status = ctx->dev->contexts_config_cpu[ctx->ctx_idx].status;
+			uint8_t status = ctx->status;
 			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 			if (acceldev_context_on_device_config_is_error(status)) {
 				kfree(run_cmd);
@@ -486,7 +488,9 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			if (run_cmd->addr + run_cmd->size > buf_data->buffer_size || buf_data->type != BUFFER_TYPE_CODE) {
 				fput(buf_file);
 				kfree(run_cmd);
-				ctx->dev->contexts_config_cpu[ctx->ctx_idx].status = ACCELDEV_CONTEXT_STATUS_ERROR;
+				spin_lock_irqsave(&ctx->ctx_lock, flags);
+				ctx->status = ACCELDEV_CONTEXT_STATUS_ERROR;
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				return -EINVAL;
    	       	}
 			if (buf_ctx->ctx_idx != ctx->ctx_idx) {
