@@ -212,6 +212,7 @@ static int submit_command(struct acceldev_device *dev, uint32_t *cmd) {
 	for (int i = 0; i < 5; i++) {
   		list_cmd->cmd[i] = cmd[i];
  	}
+	kfree(cmd);
 	list_add_tail(&list_cmd->lh, &dev->cmd_queue);
 	run_queue(dev);
 	spin_unlock_irqrestore(&dev->slock, flags);
@@ -219,7 +220,7 @@ static int submit_command(struct acceldev_device *dev, uint32_t *cmd) {
 }
 
 static int write_bind_slot(struct acceldev_device *dev, int ctx_idx, int slot, dma_addr_t page_table) {
-	uint32_t cmd[5];
+	uint32_t *cmd = kmalloc(sizeof(uint32_t) * 5,  GFP_KERNEL);
 	uint32_t idx = (uint32_t)ctx_idx;
 	cmd[0] = ACCELDEV_DEVICE_CMD_BIND_SLOT_HEADER(idx);
 	cmd[1] = slot;
@@ -439,17 +440,25 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			struct acceldev_buffer_data *buf_data = (struct acceldev_buffer_data*)buf_file->private_data;
 			struct acceldev_context *buf_ctx = buf_data->ctx_file->private_data;
 			if (run_cmd->addr + run_cmd->size > buf_data->buffer_size) {
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				fput(buf_file);
 				kfree(run_cmd);
 				return -EINVAL;
    	       	}
 			if (buf_ctx->ctx_idx != ctx->ctx_idx) {
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				printk(KERN_ERR "acceldev: Context mismatch in run command\n");
 				fput(buf_file);
 				kfree(run_cmd);
 				return -EINVAL;
 			}
-			uint32_t cmd[5];
+			uint32_t *cmd = kmalloc(sizeof(uint32_t) * 5, GFP_KERNEL);
+			if (!cmd) {
+				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+				fput(buf_file);
+				kfree(run_cmd);
+				return -ENOMEM; // Memory allocation failed
+			}
 			cmd[0] = ACCELDEV_DEVICE_CMD_RUN_HEADER(ctx->ctx_idx);
 			cmd[1] = buf_data->page_table_dma;
 			cmd[2] = buf_data->page_table_dma >> 32;
