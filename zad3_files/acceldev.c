@@ -496,11 +496,12 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			uint32_t fence_wait = wait_cmd->fence_wait;
 			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(status)) {
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
-				if (wait_event_interruptible(ctx->dev->user_waits, current_counter >= fence_wait || 
+				if (wait_event_interruptible(ctx->dev->user_waits, ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter >= fence_wait || 
 				acceldev_context_on_device_config_is_error(status))) {
 					kfree(wait_cmd);
 					return -EINTR; // Interrupted by signal
 				}
+				printk(KERN_ERR "Woken up");
 				spin_lock_irqsave(&ctx->ctx_lock, flags);
 				current_counter = ctx->dev->contexts_config_cpu[ctx->ctx_idx].fence_counter;
 			}
