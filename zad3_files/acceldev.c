@@ -21,6 +21,7 @@
 #include <linux/kref.h>
 #include <linux/interrupt.h>
 #include <linux/string.h>
+#include <string.h>
 
 #include "acceldev.h"
 
@@ -549,6 +550,7 @@ static int acceldev_release(struct inode *inode, struct file *file)
 	struct acceldev_device *dev = ctx->dev;
     for (int i = 0; i < ACCELDEV_MAX_CONTEXTS; i++) {
         if (dev->ctx[i] == ctx) {
+			memset(&dev->contexts_config_cpu[i], 0, sizeof(struct acceldev_context_on_device_config));
             dev->ctx[i] = NULL;
             break;
         }
