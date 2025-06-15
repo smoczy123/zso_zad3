@@ -204,12 +204,11 @@ static void run_queue(struct acceldev_device *dev) {
 
 static int submit_command(struct acceldev_device *dev, uint32_t *cmd) {
 	unsigned long flags;
-	spin_lock_irqsave(&dev->slock, flags);
 	struct command *list_cmd = kmalloc(sizeof(struct command), GFP_KERNEL);
 	if (!list_cmd) {
-		spin_unlock_irqrestore(&dev->slock, flags);
 		return -ENOMEM;
 	}
+	spin_lock_irqsave(&dev->slock, flags);
 	for (int i = 0; i < 5; i++) {
   		list_cmd->cmd[i] = cmd[i];
  	}
@@ -318,13 +317,15 @@ static const struct file_operations acceldev_buffer_fops = {
  .release = buffer_release,
 };
 
-static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_type type, int slot, struct acceldev_ioctl_create_buffer_result *result) {
+static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_type type, struct acceldev_ioctl_create_buffer_result *result) {
 	int err;
+	unsigned long flags;
 	struct acceldev_buffer_data *buf_data = kmalloc(sizeof(struct acceldev_buffer_data), GFP_KERNEL);
 	if (!buf_data) {
   		err = -ENOMEM;
 		goto out_buf_data;
   	}
+	
 	struct acceldev_context *ctx = ctx_file->private_data;
 	buf_data->buffer_size = size;
 	int idx = ctx->ctx_idx;
@@ -340,19 +341,34 @@ static int create_buffer(int size, struct file *ctx_file, enum acceldev_buffer_t
   		err = bfd;
 		goto out_copy;
  	}
-
+	
+	int slot = -1;
 	if (type == BUFFER_TYPE_DATA) {
+		spin_lock_irqsave(&ctx->ctx_lock, flags);
+		for (slot = 0; slot < ACCELDEV_NUM_BUFFERS; slot++) {
+			if (ctx->buffers[slot] == 0) {
+				break;
+			}
+		}
+		if (slot == ACCELDEV_NUM_BUFFERS) {
+			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+			err = -ENOSPC;
+			goto out_copy;
+		}
 		buf_data->buffer_slot = slot;
+		ctx->buffers[slot] = bfd;
+		spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 		struct acceldev_ioctl_create_buffer_result res = {.buffer_slot = slot};
 		if (copy_to_user(result, &res, sizeof(struct acceldev_ioctl_create_buffer_result))) {
 			err = -EFAULT;
+			ctx->buffers[slot] = 0;
 			goto out_copy;
 		}
 		if (write_bind_slot(ctx->dev, idx, slot, buf_data->page_table_dma)) {
 			err = -ENOMEM;
+			ctx->buffers[slot] = 0;
 			goto out_copy;
 		}
-  		ctx->buffers[slot] = bfd;
 	}
 
 	return bfd;
@@ -390,25 +406,9 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 					kfree(create_buf);
 				return -EINVAL; // Invalid arguments
 			}
-			struct acceldev_context *ctx = file->private_data;
-			spin_lock_irqsave(&ctx->ctx_lock, flags);
-			int i = -1;
-			if (create_buf->type == BUFFER_TYPE_DATA) {
-				for (i = 0; i < ACCELDEV_NUM_BUFFERS; i++) {
-					if (ctx->buffers[i] == 0) {
-						break;
-					}
-				}
-				if (i == ACCELDEV_NUM_BUFFERS) {
-					kfree(create_buf);
-					return -ENOSPC;
-				}
-			}
-
 			int size = create_buf->size;
 			enum acceldev_buffer_type type = create_buf->type;
-			int bfd = create_buffer(size, file, type, i, create_buf->result);
-			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+			int bfd = create_buffer(size, file, type, create_buf->result);
 			kfree(create_buf);
 			return bfd;
 		}
@@ -438,24 +438,24 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			
 			spin_lock_irqsave(&ctx->ctx_lock, flags);
 			uint8_t status = ctx->dev->contexts_config_cpu[ctx->ctx_idx].status;
+			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 			if (acceldev_context_on_device_config_is_error(status)) {
 				kfree(run_cmd);
 				return -EIO;
 			}
+			
 
 
 			struct file *buf_file = fget(run_cmd->cfd);
 			struct acceldev_buffer_data *buf_data = (struct acceldev_buffer_data*)buf_file->private_data;
 			struct acceldev_context *buf_ctx = buf_data->ctx_file->private_data;
 			if (run_cmd->addr + run_cmd->size > buf_data->buffer_size) {
-				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				fput(buf_file);
 				kfree(run_cmd);
 				ctx->dev->contexts_config_cpu[ctx->ctx_idx].status = ACCELDEV_CONTEXT_STATUS_ERROR;
 				return -EINVAL;
    	       	}
 			if (buf_ctx->ctx_idx != ctx->ctx_idx) {
-				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				printk(KERN_ERR "acceldev: Context mismatch in run command\n");
 				fput(buf_file);
 				kfree(run_cmd);
@@ -463,7 +463,7 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			}
 			uint32_t *cmd = kmalloc(sizeof(uint32_t) * 5, GFP_KERNEL);
 			if (!cmd) {
-				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
+				
 				fput(buf_file);
 				kfree(run_cmd);
 				return -ENOMEM; // Memory allocation failed
@@ -474,12 +474,10 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			cmd[3] = run_cmd->addr;
 			cmd[4] = run_cmd->size;
 			if (submit_command(ctx->dev, cmd) < 0) {
-				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				fput(buf_file);
 				kfree(run_cmd);
 				return -ENOMEM; // Failed to submit command
    			}
-			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 			fput(buf_file);
 			kfree(run_cmd);
 			return 0;
