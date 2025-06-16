@@ -263,7 +263,6 @@ static irqreturn_t acceldev_isr(int irq, void *opaque)
 		if (istatus & ACCELDEV_INTR_FEED_ERROR) {
 			printk(KERN_ERR "acceldev: feed error\n");
 		}
-		
 		if (istatus & ACCELDEV_INTR_CMD_ERROR) {
 			printk(KERN_ERR "acceldev: command error\n");
 		}
@@ -273,9 +272,6 @@ static irqreturn_t acceldev_isr(int irq, void *opaque)
 		if (istatus & ACCELDEV_INTR_SLOT_ERROR) {
    			printk(KERN_ERR "acceldev: slot error\n");
   		}
-		if (istatus & ACCELDEV_INTR_USER_FENCE_WAIT) {
-			printk(KERN_ERR "acceldev: user fence triggered\n");
-		}
 		if (istatus & ACCELDEV_INTR_CMD_ERROR ||
 			istatus & ACCELDEV_INTR_MEM_ERROR ||
    			istatus & ACCELDEV_INTR_SLOT_ERROR ||
@@ -311,7 +307,6 @@ static const struct vm_operations_struct buffer_vm_ops = {
 };
 
 static int buffer_release(struct inode *inode, struct file *filp) {
-	// TODO: WAIT FOR CONTEXT TO FINISH
 	unsigned long flags;
  	struct acceldev_buffer_data* buf_data = (struct acceldev_buffer_data*)filp->private_data;
 	struct acceldev_context *ctx = buf_data->ctx_file->private_data;
@@ -468,7 +463,6 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				run_cmd->addr % sizeof(uint32_t) != 0 ||
 				run_cmd->size % sizeof(uint32_t) != 0) {
 
-				printk(KERN_ERR "acceldev: Invalid arguments in run command\n");
 				spin_lock_irqsave(&ctx->ctx_lock, flags);
 				ctx->status = ACCELDEV_CONTEXT_STATUS_ERROR;
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
@@ -497,7 +491,6 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				return -EINVAL;
    	       	}
 			if (buf_ctx->ctx_idx != ctx->ctx_idx) {
-				printk(KERN_ERR "acceldev: Context mismatch in run command\n");
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
 				fput(buf_file);
 				kfree(run_cmd);
@@ -539,7 +532,6 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			spin_lock_irqsave(&ctx->ctx_lock, flags);
 			uint32_t current_counter = ctx->fence_counter;
 			uint8_t status = ctx->status;
-			printk(KERN_ERR "My counter: %u, wait: %u, ctx: %d\n", current_counter, wait_cmd->fence_wait, ctx->ctx_idx);
 			uint32_t fence_wait = wait_cmd->fence_wait;
 			while (current_counter < fence_wait && !acceldev_context_on_device_config_is_error(status)) {
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
@@ -553,12 +545,10 @@ static long acceldev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 			}
 			if  (acceldev_context_on_device_config_is_error(ctx->status)) {
 				spin_unlock_irqrestore(&ctx->ctx_lock, flags);
-				printk(KERN_ERR "Error while waiting for: %d in context %d\n", fence_wait, ctx->ctx_idx);
 				kfree(wait_cmd);
 				return -EIO; // Context is in error state
 			}
 			spin_unlock_irqrestore(&ctx->ctx_lock, flags);
-			printk(KERN_ERR "Finished waiting for: %d in context %d\n", fence_wait, ctx->ctx_idx);
    			kfree(wait_cmd);
 			return 0;
 		}
@@ -616,6 +606,25 @@ static int acceldev_release(struct inode *inode, struct file *file)
 	spin_unlock_irqrestore(&dev->slock, flags);
 	kfree(ctx);
 	return 0;
+}
+
+static int accledev_suspend(struct pci_dev *pdev, pm_message_t state)
+{
+	struct acceldev_device *dev = pci_get_drvdata(pdev);
+	acceldev_iow(dev, ACCELDEV_ENABLE, 0);
+	acceldev_iow(dev, ACCELDEV_INTR_ENABLE, 0);
+	return 0;
+}
+
+static int acceldev_resume(struct pci_dev *pdev)
+{
+ struct acceldev_device *dev = pci_get_drvdata(pdev);
+ acceldev_iow(dev, ACCELDEV_INTR, 1);
+ acceldev_iow(dev, ACCELDEV_INTR_ENABLE, ACCELDEV_INTR_FENCE_WAIT | ACCELDEV_INTR_FEED_ERROR |
+			 ACCELDEV_INTR_CMD_ERROR | ACCELDEV_INTR_MEM_ERROR |
+			 ACCELDEV_INTR_SLOT_ERROR | ACCELDEV_INTR_USER_FENCE_WAIT);
+ acceldev_iow(dev, ACCELDEV_ENABLE, 1);
+ return 0;
 }
 
 static const struct file_operations acceldev_file_ops = {
@@ -776,6 +785,8 @@ static struct pci_driver acceldev_pci_driver = {
 	.id_table = acceldev_pciids,
 	.probe = acceldev_probe,
 	.remove = acceldev_remove,
+	.suspend = accledev_suspend,
+	.resume = acceldev_resume,
 };
 
 
