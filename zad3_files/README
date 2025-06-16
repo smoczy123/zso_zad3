@@ -1,0 +1,75 @@
+# acceldev Linux Kernel Driver
+
+## Overview
+
+`acceldev` is a Linux kernel module that provides a character device interface to a custom PCIe accelerator device. The driver manages device memory, DMA, command submission, and context management, exposing a flexible interface for user-space applications to interact with the hardware.
+
+## Features
+
+- Supports up to 256 devices and 255 contexts per device
+- Manages code and data buffers with DMA-backed memory
+- Provides IOCTLs for buffer creation, command execution, and synchronization
+- Handles hardware interrupts and error reporting
+- Exposes device nodes `/dev/acceldev*` for user-space access
+
+## Device Model
+
+- Each device is represented by a `struct acceldev_device` and registered as a character device.
+- Contexts (`struct acceldev_context`) are per-open file handles, supporting isolated execution and buffer management.
+- Both contexts and the device itself are secured with spinlocks.
+- Buffers are allocated in kernel space, mapped to user space via `mmap`, and managed with DMA for device access.
+
+## IOCTL Interface
+
+The driver exposes several IOCTLs for user-space control:
+
+- `ACCELDEV_IOCTL_CREATE_BUFFER`: Allocates a code or data buffer, returning a file descriptor for further operations.
+- `ACCELDEV_IOCTL_RUN`: Submits a command to execute code in a buffer.
+- `ACCELDEV_IOCTL_WAIT`: Waits for a fence (synchronization point) to be reached.
+
+See `acceldev.h` for detailed structure definitions and usage.
+
+## Buffer Management
+
+- Buffers are allocated with DMA-coherent memory and organized in page tables.
+- Each context can have up to 16 buffers.
+- Buffers are reference-counted and released when no longer needed.
+
+## Command Submission
+
+- Commands are queued and submitted to the device via MMIO registers.
+- The driver manages a command queue and schedules execution based on hardware availability.
+- Fence commands are used for synchronization (if internal queue is close to being full, a fence command is submitted to alert the driver that further commands can be ran). 
+
+## Interrupt Handling
+
+- The driver registers an interrupt handler to process device events, including command completion and error conditions.
+- Errors are reported to user space and reflected in context status.
+
+## Building and Installation
+
+1. Build the kernel module:
+   ```sh
+   make
+   ```
+2. Insert the module:
+   ```sh
+   sudo insmod acceldev.ko
+   ```
+3. Check for device nodes `/dev/acceldev*`.
+
+
+## Usage
+
+- Open a device node to create a context.
+- Use IOCTLs to allocate buffers, submit commands, and synchronize.
+- Map buffers to user space with `mmap` for direct access.
+
+## File Structure
+
+- `acceldev.c`: Main driver implementation
+- `acceldev.h`: Public interface and IOCTL definitions
+
+## License
+
+This driver is licensed under the GPL.
